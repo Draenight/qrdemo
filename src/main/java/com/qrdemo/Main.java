@@ -10,6 +10,12 @@ import boofcv.struct.image.GrayU8;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class Main {
 
@@ -26,127 +32,187 @@ public class Main {
         // Master Patterns
         fillPatterns();
 
-        Long count = 0L;
-        Long total = 190253629440L; // 8! * 4! * 4!
-
-        System.out.println("Total combinations: " + total);
-        System.out.println("Starting full search...\n");
-
-        var detector = FactoryFiducial.microqr(new ConfigMicroQrCode(), GrayU8.class);
-
         // Generate all permutations
         List<int[][][]> halfPerms = generateAllPermutations(HALF_BRICKS_GRIDS);
         List<int[][][]> cornerPerms = generateAllPermutations(CORNER_GRIDS);
         List<int[][][]> freePerms = generateAllPermutations(FREE_GRIDS);
         List<String> binaryPerms = createMasterList();
 
+        // 1. Use AtomicLong for thread-safe counting
+        AtomicLong count = new AtomicLong(0);
+        int nThreads = Runtime.getRuntime().availableProcessors();
+        System.out.println("Running on " + nThreads + " threads");
+
+        long total = (long) halfPerms.size() * cornerPerms.size() * freePerms.size() * binaryPerms.size();
+
+        System.out.println("Total combinations: " + total);
+        System.out.println("Starting full search...\n");
+
+        // 2. Use a bounded queue to prevent memory overflow (Backpressure)
+        ExecutorService threadPool = new ThreadPoolExecutor(
+                10, 10, // Core/Max threads (adjust based on CPU)
+                60L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(10000), // Bound the queue
+                new ThreadPoolExecutor.CallerRunsPolicy() // Backpressure: Submit thread runs task if pool full
+        );
+
+        Semaphore semaphore = new Semaphore(nThreads * 2);
+
+        int batchSize = 50000;
+        List<Runnable> currentBatch = new ArrayList<>(batchSize);
+
         for (int[][][] halfPerm : halfPerms) {
             for (int[][][] cornerPerm : cornerPerms) {
                 for (int[][][] freePerm : freePerms) {
-                    for(String binaryPerm : binaryPerms ){
-                        try {
-                            int[][][] order = generateTestOrder(halfPerm, cornerPerm, freePerm);
-                            int[][] grid = buildMicroQr(order, binaryPerm);
-                            /*int[][] test_grid = {
-                                    { 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1 },
-                                    { 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1 },
-                                    { 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1 },
-                                    { 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1 },
-                                    { 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1 },
-                                    { 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0 },
-                                    { 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1 },
-                                    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0 },
-                                    { 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1 },
-                                    { 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0 },
-                                    { 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1 },
-                                    { 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1 },
-                                    { 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1 },
-                                    { 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1 },
-                                    { 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0 },
-                                    { 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0 },
-                                    { 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1 }
-                            };*/
+                    for (String binaryPerm : binaryPerms) {
 
-                            // Add 2-pixel quiet zone (required for Micro QR detection)
-                            int moduleSize = 3; // 3 pixels per module
-                            int quietZone = 2;
-                            int qrSize = SIZE * moduleSize;
-                            int totalSize = qrSize + (quietZone * 2 * moduleSize);
+                        final long currentCount = count.incrementAndGet();
 
-                            GrayU8 gray = new GrayU8(totalSize, totalSize);
+                        // Add task to batch
+                        currentBatch.add(() -> generateAndTryScanning(currentCount, halfPerm, cornerPerm, freePerm, binaryPerm));
 
-                            // Fill with white
-                            for (int r = 0; r < totalSize; r++) {
-                                for (int c = 0; c < totalSize; c++) {
-                                    gray.set(c, r, 255);
-                                }
+                        // when batch is full, we send it
+                        if (currentBatch.size() >= batchSize) {
+                            final List<Runnable> tasksToRun = new ArrayList<>(currentBatch);
+                            currentBatch.clear();
+
+                            try {
+                                semaphore.acquire(); // Block if too much batches are waiting
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                System.err.println("Queue is full, waiting for space");
+                                break;
                             }
-
-                            // Scale up the QR code (3x3 per module)
-                            for (int r = 0; r < SIZE; r++) {
-                                for (int c = 0; c < SIZE; c++) {
-                                    int color = (grid[r][c] == 1) ? 0 : 255;
-                                    for (int dr = 0; dr < moduleSize; dr++) {
-                                        for (int dc = 0; dc < moduleSize; dc++) {
-                                            gray.set(
-                                                    c * moduleSize + dc + (quietZone * moduleSize),
-                                                    r * moduleSize + dr + (quietZone * moduleSize),
-                                                    color);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Test: Generate a known good Micro QR with BoofCV and detect it
-
-                            /*MicroQrCode qrff = new MicroQrCodeEncoder()
-                                    .setError(MicroQrCode.ErrorLevel.M)
-                                    .addAutomatic("dQw4w9WgXcQ")
-                                    .fixate();
-
-                            GrayU8 testGood = MicroQrCodeGenerator.renderImage(3, 2, qrff);
-                            saveGrayU8(testGood, "good_debug_with_quiet_zone.png");
-
                             
-                            System.out.println("Saved debug image: debug_test_grid.png");
-                            saveGrayU8(gray, "debug_with_quiet_zone.png");*/
-
-                            //saveGridToImage(grid, "debug_test_grid.png");
-                            //saveGrayU8(gray, "debug_with_quiet_zone.png");
-                            detector.process(gray);
-                            List<MicroQrCode> detections = detector.getDetections();
-
-                            if (!detections.isEmpty()) {
-
-                                for (MicroQrCode qr : detections) {
-                                    if(!qr.message.isEmpty() && qr.version == 4) {
-                                        System.out.println("\n FOUND VALID MICRO QR CODE!");
-                                        System.out.println("   Message: " + qr.message);
-                                        System.out.println("   Version: " + qr.version);
-                                        System.out.println("   Error Correction: " + qr.error.toString());
-
-                                        saveGridToImage(grid, "found_microqr"+count+".png");
-                                        System.out.println("   Saved to: found_microqr"+count+".png");
-                                    }
+                            threadPool.submit(() -> {
+                                try {
+                                    for (Runnable r : tasksToRun) r.run();
+                                } finally {
+                                    semaphore.release();
                                 }
-                            }
+                            });
+                        }
 
-                            count++;
-                            if (count % 50000 == 0) {
-                                System.out.printf("Progress: %d / %d (%.2f%%)%n",
-                                        count, total, (count * 100.0 / total));
-                            }
-
-                        } catch (Exception e) {
-                            System.out.println("Error at " + count + ": " + e.getMessage());
+                        if (currentCount % 50000 == 0) {
+                            System.out.printf("Progress: %d / %d (%.2f%%)%n",
+                                    currentCount, total, (currentCount * 100.0 / total));
                         }
                     }
                 }
             }
         }
 
-        System.out.println("\nSearch complete. No valid code found.");
-        ;
+         if (!currentBatch.isEmpty()) {
+            threadPool.submit(() -> currentBatch.forEach(Runnable::run));
+        }
+
+        threadPool.shutdown();
+        try {
+            // Wait for tasks to finish (maximum a day)
+            if (!threadPool.awaitTermination(1, TimeUnit.DAYS)) {
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        System.out.println("\nSearch complete.");
+    }
+
+
+    static void generateAndTryScanning(long number, int[][][] halfPerm, int[][][] cornerPerm, int[][][] freePerm,
+            String format) {
+
+        int[][][] order = generateTestOrder(halfPerm, cornerPerm, freePerm);
+        int[][] grid = buildMicroQr(order, format);
+
+        /*
+         * int[][] test_grid = {
+         * { 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1 },
+         * { 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1 },
+         * { 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1 },
+         * { 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1 },
+         * { 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1 },
+         * { 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0 },
+         * { 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1 },
+         * { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0 },
+         * { 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1 },
+         * { 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0 },
+         * { 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1 },
+         * { 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1 },
+         * { 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1 },
+         * { 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1 },
+         * { 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0 },
+         * { 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0 },
+         * { 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1 }
+         * };
+         */
+
+        // Add 2-pixel quiet zone (required for Micro QR detection)
+        int moduleSize = 3; // 3 pixels per module
+        int quietZone = 2;
+        int qrSize = SIZE * moduleSize;
+        int totalSize = qrSize + (quietZone * 2 * moduleSize);
+
+        GrayU8 gray = new GrayU8(totalSize, totalSize);
+
+        // Fill with white
+        for (int r = 0; r < totalSize; r++) {
+            for (int c = 0; c < totalSize; c++) {
+                gray.set(c, r, 255);
+            }
+        }
+
+        // Scale up the QR code (3x3 per module)
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                int color = (grid[r][c] == 1) ? 0 : 255;
+                for (int dr = 0; dr < moduleSize; dr++) {
+                    for (int dc = 0; dc < moduleSize; dc++) {
+                        gray.set(
+                                c * moduleSize + dc + (quietZone * moduleSize),
+                                r * moduleSize + dr + (quietZone * moduleSize),
+                                color);
+                    }
+                }
+            }
+        }
+
+        // Test: Generate a known good Micro QR with BoofCV and detect it
+
+        /*
+         * MicroQrCode qrff = new MicroQrCodeEncoder()
+         * .setError(MicroQrCode.ErrorLevel.M)
+         * .addAutomatic("dQw4w9WgXcQ")
+         * .fixate();
+         * 
+         * GrayU8 testGood = MicroQrCodeGenerator.renderImage(3, 2, qrff);
+         * saveGrayU8(testGood, "good_debug_with_quiet_zone.png");
+         * 
+         * 
+         * System.out.println("Saved debug image: debug_test_grid.png");
+         * saveGrayU8(gray, "debug_with_quiet_zone.png");
+         */
+
+        // saveGridToImage(grid, "debug_test_grid.png");
+        // saveGrayU8(gray, "debug_with_quiet_zone.png");
+
+        var detector = FactoryFiducial.microqr(new ConfigMicroQrCode(), GrayU8.class);
+        detector.process(gray);
+        List<MicroQrCode> detections = detector.getDetections();
+
+        if (!detections.isEmpty()) {
+
+            for (MicroQrCode qr : detections) {
+                if (!qr.message.isEmpty() && qr.version == 4) {
+                    System.out.println("\n FOUND VALID MICRO QR CODE!");
+                    System.out.println("   Message: " + qr.message);
+                    System.out.println("   Version: " + qr.version);
+                    System.out.println("   Error Correction: " + qr.error.toString());
+
+                    saveGridToImage(grid, "found_microqr" + number + ".png");
+                    System.out.println("   Saved to: found_microqr" + number + ".png");
+                }
+            }
+        }
     }
 
     static void fillPatterns() {
@@ -317,9 +383,9 @@ public class Main {
         grid[8][0] = 1;
         for (int i = 0; i < 15; i++) {
             if (i < 7)
-                grid[i + 1][8] = Character.getNumericValue(formatBits.charAt(14-i));
+                grid[i + 1][8] = Character.getNumericValue(formatBits.charAt(14 - i));
             else
-                grid[8][15 - i] = Character.getNumericValue(formatBits.charAt(14-i));
+                grid[8][15 - i] = Character.getNumericValue(formatBits.charAt(14 - i));
         }
 
         // Place finder pattern
@@ -427,7 +493,7 @@ public class Main {
                 }
             }
 
-            javax.imageio.ImageIO.write(img, "png", new java.io.File("detected/"+filename));
+            javax.imageio.ImageIO.write(img, "png", new java.io.File("detected/" + filename));
             System.out.println("Saved: " + filename);
 
         } catch (Exception e) {
