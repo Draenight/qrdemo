@@ -50,7 +50,7 @@ public class Main {
 
         // 2. Use a bounded queue to prevent memory overflow (Backpressure)
         ExecutorService threadPool = new ThreadPoolExecutor(
-                10, 10, // Core/Max threads (adjust based on CPU)
+                nThreads, nThreads, // Core/Max threads (adjust based on CPU)
                 60L, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(10000), // Bound the queue
                 new ThreadPoolExecutor.CallerRunsPolicy() // Backpressure: Submit thread runs task if pool full
