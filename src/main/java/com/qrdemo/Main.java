@@ -56,6 +56,18 @@ public class Main {
                 new ThreadPoolExecutor.CallerRunsPolicy() // Backpressure: Submit thread runs task if pool full
         );
 
+         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("\n[!] Interrupt detected (Ctrl+C).");
+            threadPool.shutdownNow(); // Force l'arrêt des tâches en cours et vide la file
+            try {
+                if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                    
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+
         Semaphore semaphore = new Semaphore(nThreads * 2);
 
         int batchSize = 50000;
